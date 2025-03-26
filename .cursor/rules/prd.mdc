@@ -1,0 +1,233 @@
+---
+description: PRD
+globs: 
+alwaysApply: true
+---
+# Rules
+
+- The rules for each phase are critical, do not ignore them. Every time you assess a step and plan a next step, make sure you are following the rules mentioned. DO NOT IGNORE THIS.
+- Do ONE PHASE AT A TIME. Never start another phase without asking me first.
+- Never run the app to test things. I will do this myself.
+
+
+# Features
+
+## 1. Restaurant Discovery
+
+- Filterable list with restaurant cards
+- Display key restaurant information:
+	- Photo
+	- Name, price range, rating
+	- Distance from your location
+	- Google Maps link for easy navigation
+- Simple filtering options:
+	- Filter with buttons
+	- Distance (within 1mi, 2mi, 5mi, 10mi) (5mi by default)
+	- Rating (above 1, 2, 3, or 4)(no filter by default)
+	- Price range ($, $$, $$$ or $$$$)(no filter by default)
+- The list should show only the top 50 
+
+## 2. Attendee Coordination
+
+- "Join dinner" button for each restaurant
+- Display real-time count of attendees going to each place
+- You can a join a group
+- You can leave a group
+- You can only be a part of one group
+
+
+# Implementation Plan
+
+## Phase 1 - Project Setup
+
+1. Pull the latest Epic Stack with `npx create-epic-app@latest`
+2. Prepare database
+	1. Add db models
+		- **Restaurants** (cached from API):
+			- id (from Google Place ID), name, priceLevel, rating, lat, lng, photoRef, mapsUrl
+			- createdAt, updatedAt (for cache invalidation)
+		- **DinnerGroups**:
+			- id, restaurantId (@unique), notes, createdAt
+		- **Attendees**:
+			- id, userId, dinnerGroupId, createdAt
+	2. Run the migrations
+	3. Run `npx prisma db seed` (don't edit the seed file, just run it)
+4. Add API Keys for Google and Resend
+- The real keys are in .tmp (delete .tmp using `rm .tmp` once you've used the keys)
+	1. Add placeholders to .env.example
+	2. Update env.server
+		- only add the API keys for the server
+	3. Update .env with the real keys
+5. Deploy the required Resend and Google keys from .env to Fly with `fly secrets set`
+6. Update our email domain
+	1. in `utils/email.server` to enable emails
+	2. in our onboarding e2e tests
+
+## Phase 2 - APIs and Services
+
+1. Implement the Google API:
+    - Rules:
+        - Use the exisitng `invariant` util from `@epic-web/invariant`
+    - Lives in `utils/providers/google-places.server.ts`
+    - Has a single getNearbyRestaurants({lat, lng, radius}) function
+    - Uses two primary Google API endpoints:
+        - Nearby Search: @[https://maps.googleapis.com/maps/api/place/nearbysearch/json]
+        - Place Details: @[https://maps.googleapis.com/maps/api/place/details/json]
+    - Makes an initial Nearby Search request:
+        - Only fetch places that are restaurants
+        - No filtering at API level (maximizes cache efficiency)
+    - For each restaurant found:
+        - Makes parallel request to Place Details API
+        - Gets additional info (photoReference, Maps URL)
+    - Transforms data to match database schema
+
+2. Implement Restaurant Service:
+    - Lives in `utils/restaurants.server.ts`
+    - Single source of truth for restaurant data
+    - Implements caching strategy:
+        - Use cachified and lruCache from `#app/utils/cache.server`
+        - Cache API calls to Google Places
+        - Cache database queries for restaurant data
+        - Do NOT cache attendance data (must be real-time)
+    - Handles all database operations:
+        - Upserting restaurants from Google Places API
+        - Getting all restaurants
+        - Getting attendee count per restaurant
+        - Getting the restaurant the user is attending
+        - Managing dinner group membership
+    - Provides comprehensive functions:
+        - `getAllRestaurantDetails` - combines cached restaurant data with real-time attendance data
+        - `joinDinnerGroup` - handles joining a restaurant group
+        - `leaveDinnerGroup` - handles leaving a restaurant group
+    - Provides shared types:
+        - RestaurantWithDetails (includes attendance and distance)
+    - No data merging or calculations at UI layer
+
+3. Implement Resource Routes:
+    - Rules:
+        - Use `react-router` imports only - DO NOT USE `@remix-run/*` imports
+        - Use the '#app/..' path alias instead of relative imports
+        - Return objects directly (no `json({})` wrapper)
+    - Routes:
+        - `resources+/maps+/photo`:
+			- this is so we dont store the full photo url in the db with the api key
+            - Receives photo reference
+            - Returns photo data
+
+
+Stop here. Do not proceed to Phase 3 until I say so.
+
+## Phase 3 - Restaurants Route Backend
+
+1. Add `routes/users+/$username_+/restaurants.tsx` Server Functions:
+    - Rules:
+        - Use `react-router` imports only - DO NOT USE `@remix-run/*` imports
+        - Return objects directly (no `json({})` wrapper)
+        - No client-side state management
+    
+ - loader:
+        - Directly calls `getAllRestaurantDetails` from restaurant service
+        - Uses Hilton coordinates (40.7596, -111.8867)
+        - Splits into two lists:
+            1. restaurantsWithAttendance:
+                - All restaurants with attendees
+                - Sorted by desc number of attendees
+            2. restaurantsNearby:
+                - All restaurants without attendees
+                - All filtering done locally for maximum cache efficiency:
+                    - distance: within selected radius
+                    - rating: >= selected value
+                    - price: exact match on selected level
+                - filtering via individual url search params for link sharing 
+                - Sorted by:
+                    1. Rating (desc)
+                    2. Distance (asc) as tiebreaker
+                - Limited to top 50 results
+		- do not check for the username param
+
+    
+    - action:
+        - Handles join/leave dinner group intents
+        - Uses restaurants.server.ts service functions
+        - No data transformation, just database operations
+        - Uses useFetcher() for UI updates
+		- Uses Zod validation for form data
+		- the action will trigger react-router's data revalidation by default, which will ensure the UI is always updated
+
+Now double check that you are using `react-router` imports only - DO NOT USE `@remix-run/*` imports
+And remove any `json({})` wrappers 
+
+## Phase 4 - Restaurants Route Frontend
+
+1. Add navigation to the new route
+	- in the existing `user-dropdown`
+		- remove the navigation to Notes 
+		- add navigation to Restaurants
+			- use the `magnifying-glass` icon
+
+2. Add base UI Components. 
+	1. Install all required components at once using `npx shadcn@latest add <component>`
+	2. Update all new shadcn components to import `cn` from `#app/utils/misc.tsx` instead of `#app/lib/utils` 
+	3. Install `lucide-react` for icons
+
+3. Add `routes/users+/$username_+/restaurants.tsx` frontend
+	- Rules:
+		- DO NOT use client side state or fetching, rather:
+			- Manage state with loaders and actions
+			- Use `useFetcher()` for smaller UI updates
+		- Split the UI into components within the same route file. 
+	- Frontend layout:
+		- Header that says:
+			- If not attending any restaurant: "You're having dinner on your own 🧘‍♂️"
+			- If attending a restaurant: "You've got dinner plans! 🎉"
+		- Dinner Plans Section (don't show a header for this section)
+			- shows all restaurantsWithAttendance
+			- the restaurant that the user is attending shoud have clear styling to emphasise this
+			- an empty state with a dashed border that says 'Everyone is having dinner on their own 🤷'
+				- it should be the same height as 2 RestaurantCards to avoid layout shift when a card is added
+		- Restaurant List Section
+			- Has a `Filters`  component at the top 
+				- all filters can only have one active toggle at a time
+				- 3 horizontal rows of toggle buttons:
+					- Distance
+					- Rating (use ⭐, ⭐⭐, etc.)
+					- Price (use $, $$, etc.)
+				- each row should have 4 equally sized toggles
+				- toggle needs to add or remove filter search params
+				- when updating search params, use `{ preventScrollReset: true, replace: true }` options
+			- Has a list of `RestaurantCard` components
+				- Photo with overlaid info:
+					- Rating (use ⭐)
+					- Price (use $)(show nothing if no price info)
+				- Name
+				- Distance from location (use pin icon, e.g. 1.2mi)
+				- Directions link (use map icon)
+				- Attendance count (e.g. '3 attending')
+				- Join/leave button 
+					- use Fetchers to trigger joining and leaving restaurants
+					- use the `StatusButton` component (it already exists) and the fetcher status to show states:
+						- Join
+						- Joining...
+						- Leave 
+							- apply destructive variant for this state
+							- show when `restaurant.isUserAttending` is true
+						- Leaving...
+					- full width at the bottom
+4. Add animation
+	1. `npm install motion`
+	2.  use `motion` and `AnimatePresence` from "motion/react" to add tasteful layout animation to the restaurant cards. They should:
+		- smoothly fade in and out when filters are changed or when moving between the main list and the dinner plans list
+		- smoothly reposition when moving within the grid
+5. Add some style - sleek, modern, minimal, with a little bit of character
+	- please don't use color gradient text - this does not look good
+
+## Phase 5 - Custom Domain Setup 
+
+1. Connect to custom domain
+	- Domain is dinnernotonyourown.com
+	- Domain is provided by CloudFlare
+	- DO NOT use cloudflare's proxying feature
+	- We need to add A, AAAA and CNAME records
+	- Set up the root domain and the www. subdomain
+	- Use `fly certs` instead of `fly domains` (it is deprecated)
+	- We just need to add the required DNS records to Cloudflare - DO NOT DO ANYTHING ELSE
